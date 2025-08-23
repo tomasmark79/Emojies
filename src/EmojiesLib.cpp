@@ -18,7 +18,6 @@ namespace dotname {
 
   EmojiesLib::EmojiesLib () {
     LOG_D_STREAM << libName_ << " constructed ..." << std::endl;
-    AssetContext::clearAssetsPath ();
   }
 
   EmojiesLib::EmojiesLib (const std::filesystem::path& assetsPath) : EmojiesLib () {
