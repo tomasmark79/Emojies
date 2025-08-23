@@ -1,0 +1,70 @@
+services:
+  # Development environment with proper user mapping
+  dotnamecpp-dev:
+    build:
+      context: ..  # Parent directory (project root)
+      dockerfile: docker/Dockerfile
+      target: development
+      args:
+        - USER_ID=${USER_ID:-1000}
+        - GROUP_ID=${GROUP_ID:-1000}
+        - USERNAME=${USERNAME:-developer}
+    container_name: dotnamecpp-dev
+    volumes:
+      # Mount source code for live development with proper permissions
+      - ..:/workspace/DotNameCpp:z
+      # Persistent Conan cache (now in user home)
+      - conan-cache:/home/tomas/.conan2
+      # Persistent ccache (now in user home)
+      - ccache-cache:/home/tomas/.ccache
+    ports:
+      - "8080:8080"  # For local web server
+    environment:
+      - CONAN_USER_HOME=/home/tomas
+      - CCACHE_DIR=/home/tomas/.ccache
+    working_dir: /workspace/DotNameCpp
+    tty: true
+    stdin_open: true
+    command: bash -c "source /home/tomas/.bashrc && exec bash"
+
+  # Production web server
+  dotnamecpp-web:
+    build:
+      context: ..  # Parent directory (project root)
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: dotnamecpp-web
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    depends_on:
+      - dotnamecpp-dev
+
+  # Clean development environment (no volumes)
+  dotnamecpp-clean:
+    build:
+      context: ..  # Parent directory (project root)
+      dockerfile: docker/Dockerfile
+      target: development
+      args:
+        - USER_ID=${USER_ID:-1000}
+        - GROUP_ID=${GROUP_ID:-1000}
+        - USERNAME=${USERNAME:-developer}
+    container_name: dotnamecpp-clean
+    ports:
+      - "8081:8080"
+    working_dir: /workspace/DotNameCpp
+    tty: true
+    stdin_open: true
+    command: bash -c "source /home/tomas/.bashrc && exec bash"
+
+volumes:
+  conan-cache:
+    driver: local
+  ccache-cache:
+    driver: local
+
+networks:
+  default:
+    name: dotnamecpp-network-docker
+    driver: bridge

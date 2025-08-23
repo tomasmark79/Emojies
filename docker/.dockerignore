@@ -1,0 +1,71 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# Build artifacts
+build/
+doc/html/
+doc/latex/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+SolutionController.log
+
+# Cache directories
+.cache/
+.ccache/
+.conan2/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Documentation build
+doc/html/
+doc/latex/
+
+# Test artifacts
+Testing/
+CTestTestfile.cmake
+
+# Coverage reports
+coverage/
+*.gcov
+*.gcda
+*.gcno
+
+# Backup files
+*.bak
+*.backup
+
+# Archives
+*.tar.gz
+*.zip
+*.7z
+
+# Docker files (don't copy themselves)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# README for Docker context (we copy it explicitly)
+# README.md

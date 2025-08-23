@@ -1,0 +1,98 @@
+name: Docker Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+# Tests Docker environment with proper user mapping
+# Fixes root ownership issues by using matching UID/GID
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    
+    env:
+      USER_ID: 1001
+      GROUP_ID: 1001  
+      USERNAME: runner
+    
+    strategy:
+      matrix:
+        target: [development, production]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build Docker image (${{ matrix.target }})
+      run: |
+        docker build \
+          --target ${{ matrix.target }} \
+          --build-arg USER_ID=${USER_ID} \
+          --build-arg GROUP_ID=${GROUP_ID} \
+          --build-arg USERNAME=${USERNAME} \
+          -f docker/Dockerfile \
+          -t dotnamecpp:${{ matrix.target }} .
+        
+    - name: Test development environment
+      if: matrix.target == 'development'
+      run: |
+        # Test basic functionality
+        docker run --rm dotnamecpp:development python3 --version
+        docker run --rm dotnamecpp:development cmake --version
+        docker run --rm dotnamecpp:development conan --version
+        
+        # Test that container user is correct
+        docker run --rm dotnamecpp:development whoami
+        
+        # Test workspace access
+        docker run --rm dotnamecpp:development ls -la /workspace/DotNameCpp/
+        
+    - name: Test production web server
+      if: matrix.target == 'production'
+      run: |
+        # Start nginx in background
+        docker run -d --name nginx-test -p 8080:80 dotnamecpp:production
+        
+        # Wait for nginx to start
+        sleep 5
+        
+        # Test if server responds
+        curl -f http://localhost:8080/ || exit 1
+        
+        # Cleanup
+        docker stop nginx-test
+        docker rm nginx-test
+
+  docker-compose-test:
+    runs-on: ubuntu-latest
+    
+    env:
+      USER_ID: 1001
+      GROUP_ID: 1001
+      USERNAME: runner
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Test Docker Compose
+      run: |
+        # Test compose file syntax
+        docker compose -f docker/docker-compose.yml config
+        
+        # Build development service  
+        docker compose -f docker/docker-compose.yml build dotnamecpp-dev
+        
+        # Test basic commands
+        docker compose -f docker/docker-compose.yml run --rm dotnamecpp-dev python3 --version
+        docker compose -f docker/docker-compose.yml run --rm dotnamecpp-dev conan --version
+        docker compose -f docker/docker-compose.yml run --rm dotnamecpp-dev whoami
+        
+        # Cleanup
+        docker compose -f docker/docker-compose.yml down -v

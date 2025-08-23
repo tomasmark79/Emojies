@@ -1,0 +1,351 @@
+name: Create and Maintain Public Repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: 'Force full synchronization'
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'standalone/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakeUserPresets.json'
+      - 'conanfile.py'
+      - 'README.md'
+      - 'LICENSE'
+      - '.github/workflows/make-pub.yml'
+      - '.github/workflows/make-pub.conf'
+
+env:
+  PUB_REPO_NAME: ${{ github.event.repository.name }}-Pub
+  CONFIG_FILE: .github/workflows/make-pub.conf
+  GH_TOKEN: ${{ secrets.PUB_REPO_TOKEN }}
+
+jobs:
+  sync-to-public:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout source repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Python for scripts
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Validate token availability
+      id: validate_token
+      run: |
+        if [[ -z "${{ env.GH_TOKEN }}" ]]; then
+          echo "❌ No personal access token (PAT) available in secrets.PUB_REPO_TOKEN"
+          echo "has_token=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        echo "has_token=true" >> $GITHUB_OUTPUT
+        echo "✅ Authentication token (PAT) available"
+
+    - name: Initialize sync configuration
+      id: check_enabled
+      run: |
+        if [[ ! -f "${{ env.CONFIG_FILE }}" ]]; then
+          echo "❌ Configuration file not found: ${{ env.CONFIG_FILE }}"
+          exit 1
+        fi
+
+        if grep -q "^ENABLE_SYNC=true" "${{ env.CONFIG_FILE }}"; then
+          echo "enabled=true" >> $GITHUB_OUTPUT
+          echo "✅ Public repository sync is enabled"
+        else
+          echo "enabled=false" >> $GITHUB_OUTPUT
+          echo "❌ Public repository sync is disabled. Set ENABLE_SYNC=true in ${{ env.CONFIG_FILE }} to enable."
+          exit 1
+        fi
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "${{ github.actor }}"
+        git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+    - name: Check if public repository exists
+      id: check_repo
+      run: |
+        echo "Checking if repository ${{ github.repository_owner }}/${{ env.PUB_REPO_NAME }} exists..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" \
+          -H "Authorization: token ${{ env.GH_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository_owner }}/${{ env.PUB_REPO_NAME }}")
+        
+        if [[ "$response" == "200" ]]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "✅ Repository exists"
+        elif [[ "$response" == "404" ]]; then
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "📍 Repository does not exist"
+        else
+          echo "❌ Unable to check repository status. HTTP code: $response"
+          exit 1
+        fi
+
+    - name: Create public repository if it doesn't exist
+      if: steps.check_repo.outputs.exists == 'false'
+      run: |
+        echo "Creating new public repository: ${{ env.PUB_REPO_NAME }}"
+        OWNER_TYPE=$(curl -s -H "Authorization: token ${{ env.GH_TOKEN }}" "https://api.github.com/users/${{ github.repository_owner }}" | jq -r .type)
+        
+        if [[ "$OWNER_TYPE" == "Organization" ]]; then
+          API_URL="https://api.github.com/orgs/${{ github.repository_owner }}/repos"
+        else
+          API_URL="https://api.github.com/user/repos"
+        fi
+
+        response=$(curl -s -w "%{http_code}" -X POST \
+          -H "Authorization: token ${{ env.GH_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "$API_URL" \
+          -d '{
+            "name": "${{ env.PUB_REPO_NAME }}",
+            "description": "Public version of ${{ github.event.repository.name }}",
+            "private": false,
+            "auto_init": true
+          }')
+        
+        http_code="${response: -3}"
+        if [[ "$http_code" == "201" ]]; then
+          echo "✅ Repository created successfully"
+          sleep 10
+        else
+          echo "❌ Failed to create repository. HTTP code: $http_code"
+          exit 1
+        fi
+
+    - name: Setup public repository workspace
+      run: |
+        PUB_FOLDER="${{ env.PUB_REPO_NAME }}"
+        echo "Setting up workspace in $PUB_FOLDER"
+        rm -rf "$PUB_FOLDER"
+        git clone "https://${{ env.GH_TOKEN }}@github.com/${{ github.repository_owner }}/${{ env.PUB_REPO_NAME }}.git" "$PUB_FOLDER"
+
+    - name: Prepare files for sync
+      id: prepare_files
+      run: |
+        echo "📦 Preparing files for synchronization..."
+        rm -rf temp-sync
+        mkdir -p temp-sync
+
+        # Parse configuration file
+        echo "📋 Processing configuration file..."
+        
+        # Create temporary files for processing
+        INCLUDES_TEMP=$(mktemp)
+        EXCLUDES_TEMP=$(mktemp)
+        
+        # Parse configuration file and clean patterns
+        while IFS= read -r line; do
+          # Skip comments, empty lines, and ENABLE_SYNC
+          [[ "$line" =~ ^[[:space:]]*# ]] && continue
+          [[ -z "${line// }" ]] && continue
+          [[ "$line" =~ ^ENABLE_SYNC ]] && continue
+          
+          # Remove inline comments and trim whitespace
+          clean_line=$(echo "$line" | sed 's/[[:space:]]*#.*$//' | xargs)
+          [[ -z "$clean_line" ]] && continue
+          
+          if [[ "$clean_line" =~ ^!(.*)$ ]]; then
+            # Exclude pattern (remove leading !)
+            echo "${BASH_REMATCH[1]}" >> "$EXCLUDES_TEMP"
+          else
+            # Include pattern
+            echo "$clean_line" >> "$INCLUDES_TEMP"
+          fi
+        done < "${{ env.CONFIG_FILE }}"
+        
+        echo "📁 Include patterns:"
+        cat "$INCLUDES_TEMP"
+        echo "🚫 Exclude patterns:"
+        cat "$EXCLUDES_TEMP"
+        
+        # Function to check if file should be excluded
+        is_excluded() {
+          local file_path="$1"
+          local file_basename=$(basename "$file_path")
+          
+          while IFS= read -r exclude_pattern; do
+            [[ -z "$exclude_pattern" ]] && continue
+            
+            # Different matching strategies
+            if [[ "$exclude_pattern" == *"**"* ]]; then
+              # Recursive wildcard (e.g., **/*.tmp, **/.DS_Store)
+              local pattern_suffix="${exclude_pattern#**/}"
+              if [[ "$file_path" == *"$pattern_suffix" ]] || [[ "$file_basename" == "$pattern_suffix" ]]; then
+                echo "🚫 Excluded (recursive): $file_path (pattern: $exclude_pattern)"
+                return 0
+              fi
+            elif [[ "$exclude_pattern" == *"*"* ]]; then
+              # Simple wildcard (e.g., *.tmp)
+              if [[ "$file_basename" == $exclude_pattern ]]; then
+                echo "🚫 Excluded (wildcard): $file_path (pattern: $exclude_pattern)"
+                return 0
+              fi
+            elif [[ "$exclude_pattern" =~ /$ ]]; then
+              # Directory pattern (e.g., private/, .cache/)
+              if [[ "$file_path/" == *"$exclude_pattern"* ]] || [[ "$file_path" == *"${exclude_pattern%/}" ]]; then
+                echo "🚫 Excluded (directory): $file_path (pattern: $exclude_pattern)"
+                return 0
+              fi
+            else
+              # Exact file pattern (e.g., ems-mini.html, assets/ems-mini.html)
+              if [[ "$file_path" == "$exclude_pattern" ]] || \
+                 [[ "$file_basename" == "$exclude_pattern" ]] || \
+                 [[ "$file_path" == *"/$exclude_pattern" ]]; then
+                echo "🚫 Excluded (exact): $file_path (pattern: $exclude_pattern)"
+                return 0
+              fi
+            fi
+          done < "$EXCLUDES_TEMP"
+          
+          return 1  # not excluded
+        }
+        
+        # Process include patterns
+        while IFS= read -r include_pattern; do
+          [[ -z "$include_pattern" ]] && continue
+          
+          echo "🔄 Processing pattern: $include_pattern"
+          
+          if [[ "$include_pattern" == *"**"* ]]; then
+            # Recursive wildcard pattern (e.g., **/*.cpp)
+            pattern_suffix="${include_pattern#**/}"
+            echo "🌟 Searching for: $pattern_suffix"
+            
+            find . -name "$pattern_suffix" -type f -not -path "./temp-sync/*" -not -path "./${{ env.PUB_REPO_NAME }}/*" | while read -r file; do
+              file="${file#./}"  # Remove leading ./
+              if ! is_excluded "$file"; then
+                parent_dir="temp-sync/$(dirname "$file")"
+                mkdir -p "$parent_dir"
+                cp "$file" "temp-sync/$file"
+                echo "✅ Wildcard copied: $file"
+              fi
+            done
+            
+          elif [[ "$include_pattern" == *"*"* ]]; then
+            # Simple wildcard pattern (e.g., *.md)
+            echo "🔍 Searching for: $include_pattern"
+            
+            find . -maxdepth 1 -name "$include_pattern" -type f -not -path "./temp-sync/*" | while read -r file; do
+              file="${file#./}"
+              if ! is_excluded "$file"; then
+                cp "$file" "temp-sync/$file"
+                echo "✅ Pattern copied: $file"
+              fi
+            done
+            
+          elif [[ -e "$include_pattern" ]]; then
+            # Existing file or directory
+            echo "📁 Processing existing: $include_pattern"
+            
+            if [[ -d "$include_pattern" ]]; then
+              # Directory - copy all contents while checking excludes
+              find "$include_pattern" -type f | while read -r file; do
+                if ! is_excluded "$file"; then
+                  parent_dir="temp-sync/$(dirname "$file")"
+                  mkdir -p "$parent_dir"
+                  cp "$file" "temp-sync/$file"
+                  echo "✅ Copied: $file"
+                fi
+              done
+            else
+              # Single file
+              if ! is_excluded "$include_pattern"; then
+                parent_dir="temp-sync/$(dirname "$include_pattern")"
+                mkdir -p "$parent_dir"
+                cp "$include_pattern" "temp-sync/$include_pattern"
+                echo "✅ Copied: $include_pattern"
+              fi
+            fi
+          else
+            echo "⚠️  Not found: $include_pattern"
+          fi
+        done < "$INCLUDES_TEMP"
+        
+        # Cleanup temp files
+        rm -f "$INCLUDES_TEMP" "$EXCLUDES_TEMP"
+
+        echo "📊 Files prepared: $(find temp-sync -type f 2>/dev/null | wc -l) files"
+        echo "📂 Directories prepared: $(find temp-sync -type d 2>/dev/null | wc -l) directories"
+        
+        # Show structure for debugging
+        echo "🗂️ Structure copied:"
+        find temp-sync -type f 2>/dev/null | head -20
+        
+        # Check if there are any files to sync
+        if [ -z "$(find temp-sync -type f 2>/dev/null)" ]; then
+          echo "is_empty=true" >> $GITHUB_OUTPUT
+          echo "⚠️  No files to sync"
+        else
+          echo "is_empty=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Sync to public repository
+      if: steps.prepare_files.outputs.is_empty == 'false'
+      run: |
+        PUB_FOLDER="${{ env.PUB_REPO_NAME }}"
+        cd "$PUB_FOLDER"
+
+        # Clean up everything except .git
+        find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+
+        # Copy new files (including hidden files)
+        echo "📂 Files in temp-sync before copy:"
+        ls -la ../temp-sync/
+        
+        shopt -s dotglob  # Enable copying hidden files
+        cp -r ../temp-sync/* .
+        shopt -u dotglob  # Disable dotglob after use
+        
+        echo "📂 Files in public repo after copy:"
+        ls -la
+
+        # Generate README if script exists
+        if [[ -f "../.github/workflows/generate_readme.py" ]]; then
+          CURRENT_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          python3 ../.github/workflows/generate_readme.py \
+            "${{ env.PUB_REPO_NAME }}" \
+            "${{ github.repository }}" \
+            "${{ github.sha }}" \
+            "$CURRENT_TIME"
+        fi
+        
+        git add .
+        
+        if git diff --staged --quiet; then
+          echo "📝 No changes to commit"
+          exit 0
+        fi
+
+        # Get the list of changed files for the commit message
+        CHANGED_FILES_COUNT=$(git status --porcelain | wc -l)
+        
+        git commit -m "🔄 Auto-sync from private repository
+        
+        Source Commit: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        Files Changed: $CHANGED_FILES_COUNT"
+        
+        echo "🚀 Pushing changes to public repository..."
+        git push origin main
+
+    - name: Generate sync report
+      if: always()
+      run: echo "Sync process finished. Check logs for details."
