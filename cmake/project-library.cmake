@@ -34,19 +34,20 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/${LIBRARY_NAME}/
 # ==============================================================================
 # Try to find dependencies via find_package (Conan/system), fallback to CPM
 
-# Try fmt via find_package first (for Conan users)
-find_package(fmt QUIET)
-if(NOT fmt_FOUND)
-    # Fallback to CPM for standalone usage
+# find_package(fmt QUIET) # Disabled to always use CPM to avoid conflicts
+if(NOT TARGET fmt::fmt)
     CPMAddPackage(
-        NAME fmt
         GITHUB_REPOSITORY fmtlib/fmt
-        VERSION 11.2.0)
+        GIT_TAG 12.1.0
+        OPTIONS "FMT_INSTALL YES" "FMT_TEST NO" "FMT_DOC NO")
 endif()
 
-# Try nlohmann_json via find_package first (for Conan users)
+# find_package(nlohmann_json QUIET) # Disabled to always use CPM to avoid conflicts
 if(NOT TARGET nlohmann_json AND NOT TARGET nlohmann_json::nlohmann_json)
     CPMAddPackage("gh:nlohmann/json@3.12.0")
+    if(TARGET nlohmann_json)
+        install(TARGETS nlohmann_json EXPORT ${LIBRARY_NAME}Targets)
+    endif()
 endif()
 
 # CPM packages specific to library
