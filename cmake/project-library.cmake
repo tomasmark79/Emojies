@@ -45,13 +45,8 @@ if(NOT fmt_FOUND)
 endif()
 
 # Try nlohmann_json via find_package first (for Conan users)
-find_package(nlohmann_json QUIET)
-if(NOT nlohmann_json_FOUND)
-    # Fallback to CPM for standalone usage
-    CPMAddPackage(
-        NAME nlohmann_json
-        GITHUB_REPOSITORY nlohmann/json
-        VERSION 3.12.0)
+if(NOT TARGET nlohmann_json AND NOT TARGET nlohmann_json::nlohmann_json)
+    CPMAddPackage("gh:nlohmann/json@3.12.0")
 endif()
 
 # CPM packages specific to library
